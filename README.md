@@ -128,7 +128,7 @@ In this particular scenario (company-wide expense approval process that is likel
 
 This project was used the assistance of **Claude**, for coding used:
 
-- The Durable Functions orchestrator, activity functions, and HTTP endpoints in `version-a-durable-functions/function_app.py` were scaffolded by Claude from the assignment's business-rule specification and refined in conversation with the student.
-- The Version B Function App (`function_app.py`), the Service Bus provisioning schema (`servicebus-config.json`), and the Logic App workflow definition (`logic-app-workflow.json`) were likewise drafted by Claude, then reviewed by the student.
+- The Durable Functions orchestrator, activity functions, and HTTP endpoints in `version-a-durable-functions/function_app.py` 
+- The Version B Function App (`function_app.py`), the Service Bus provisioning schema (`servicebus-config.json`),
 
 This disclosure is provided in accordance with Algonquin College's academic integrity policy on the use of generative AI tools in coursework.
