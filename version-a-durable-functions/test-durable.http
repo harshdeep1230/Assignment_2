@@ -1,0 +1,190 @@
+### =========================================================================
+### CST8917 - Assignment 2 - Version A (Durable Functions)
+### Test suite covering all 6 mandatory scenarios.
+###
+### Requires the VS Code "REST Client" extension (humao.rest-client).
+### Start the Functions host first:  func start
+### =========================================================================
+
+@baseUrl = http://localhost:7071/api
+
+### -------------------------------------------------------------------------
+### SCENARIO 1: Valid expense < $100  ->  Auto-approved (no manager step)
+### -------------------------------------------------------------------------
+# @name scenario1_submit
+POST {{baseUrl}}/expenses
+Content-Type: application/json
+
+{
+  "employee_name": "Alice Smith",
+  "employee_email": "alice.smith@example.com",
+  "amount": 45.00,
+  "category": "meals",
+  "description": "Team lunch with client",
+  "manager_email": "manager.bob@example.com"
+}
+
+### Check status (wait a couple seconds after the request above, then run this)
+GET {{scenario1_submit.response.body.statusQueryGetUri}}
+
+
+### -------------------------------------------------------------------------
+### SCENARIO 2: Valid expense >= $100  ->  Manager APPROVES
+### Step A: submit the expense (orchestration will pause awaiting the event)
+### -------------------------------------------------------------------------
+# @name scenario2_submit
+POST {{baseUrl}}/expenses
+Content-Type: application/json
+
+{
+  "employee_name": "Carlos Diaz",
+  "employee_email": "carlos.diaz@example.com",
+  "amount": 450.00,
+  "category": "travel",
+  "description": "Flight to client site in Toronto",
+  "manager_email": "manager.bob@example.com"
+}
+
+### Check status - should show runtime_status = Running, custom_status = "Awaiting manager decision..."
+GET {{scenario2_submit.response.body.statusQueryGetUri}}
+
+### Step B: Manager approves the request (send within the timeout window, default 2 min)
+POST {{baseUrl}}/expenses/{{scenario2_submit.response.body.id}}/decision
+Content-Type: application/json
+
+{
+  "decision": "approved",
+  "comments": "Looks good, approved for the Toronto trip."
+}
+
+### Check final status - should show runtime_status = Completed, output.status = "approved"
+GET {{scenario2_submit.response.body.statusQueryGetUri}}
+
+
+### -------------------------------------------------------------------------
+### SCENARIO 3: Valid expense >= $100  ->  Manager REJECTS
+### -------------------------------------------------------------------------
+# @name scenario3_submit
+POST {{baseUrl}}/expenses
+Content-Type: application/json
+
+{
+  "employee_name": "Priya Nair",
+  "employee_email": "priya.nair@example.com",
+  "amount": 899.99,
+  "category": "equipment",
+  "description": "New graphics tablet",
+  "manager_email": "manager.bob@example.com"
+}
+
+### Check status while pending
+GET {{scenario3_submit.response.body.statusQueryGetUri}}
+
+### Manager rejects the request
+POST {{baseUrl}}/expenses/{{scenario3_submit.response.body.id}}/decision
+Content-Type: application/json
+
+{
+  "decision": "rejected",
+  "comments": "Not required for current project scope."
+}
+
+### Check final status - should show output.status = "rejected"
+GET {{scenario3_submit.response.body.statusQueryGetUri}}
+
+
+### -------------------------------------------------------------------------
+### SCENARIO 4: Valid expense >= $100  ->  No manager response -> ESCALATED
+### Just submit and DO NOT send a decision. Wait longer than
+### APPROVAL_TIMEOUT_MINUTES (default 2 min in local.settings.example.json),
+### then poll status.
+### -------------------------------------------------------------------------
+# @name scenario4_submit
+POST {{baseUrl}}/expenses
+Content-Type: application/json
+
+{
+  "employee_name": "Daniel Wu",
+  "employee_email": "daniel.wu@example.com",
+  "amount": 1200.00,
+  "category": "software",
+  "description": "Annual IDE license renewal",
+  "manager_email": "manager.bob@example.com"
+}
+
+### Wait > 2 minutes, then check status - should show output.status = "escalated"
+GET {{scenario4_submit.response.body.statusQueryGetUri}}
+
+
+### -------------------------------------------------------------------------
+### SCENARIO 5: Missing required fields -> Validation error
+### (missing manager_email and description)
+### -------------------------------------------------------------------------
+# @name scenario5_submit
+POST {{baseUrl}}/expenses
+Content-Type: application/json
+
+{
+  "employee_name": "Emma Brown",
+  "employee_email": "emma.brown@example.com",
+  "amount": 60.00,
+  "category": "supplies"
+}
+
+### Check status - should show output.status = "validation_error" with a list of missing fields
+GET {{scenario5_submit.response.body.statusQueryGetUri}}
+
+
+### -------------------------------------------------------------------------
+### SCENARIO 6: Invalid category -> Validation error
+### -------------------------------------------------------------------------
+# @name scenario6_submit
+POST {{baseUrl}}/expenses
+Content-Type: application/json
+
+{
+  "employee_name": "Frank Lee",
+  "employee_email": "frank.lee@example.com",
+  "amount": 250.00,
+  "category": "entertainment",
+  "description": "Client dinner and event tickets",
+  "manager_email": "manager.bob@example.com"
+}
+
+### Check status - should show output.status = "validation_error" (invalid category)
+GET {{scenario6_submit.response.body.statusQueryGetUri}}
+
+
+### -------------------------------------------------------------------------
+### EXTRA: Error handling checks
+### -------------------------------------------------------------------------
+
+### Malformed JSON body -> 400
+POST {{baseUrl}}/expenses
+Content-Type: application/json
+
+{ this is not valid json }
+
+### Manager decision with invalid decision value -> 400
+POST {{baseUrl}}/expenses/{{scenario2_submit.response.body.id}}/decision
+Content-Type: application/json
+
+{
+  "decision": "maybe"
+}
+
+### Manager decision against a non-existent instance ID -> 404
+POST {{baseUrl}}/expenses/00000000-0000-0000-0000-000000000000/decision
+Content-Type: application/json
+
+{
+  "decision": "approved"
+}
+
+### Manager decision submitted twice (after scenario 2 is already Completed) -> 409
+POST {{baseUrl}}/expenses/{{scenario2_submit.response.body.id}}/decision
+Content-Type: application/json
+
+{
+  "decision": "rejected"
+}

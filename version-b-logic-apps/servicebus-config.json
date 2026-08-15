@@ -1,0 +1,65 @@
+{
+  "_description": "Service Bus resource schema for Version B (Logic Apps). Not an ARM template - a readable config manifest paired with the Azure CLI commands used to provision it. See 'provisioning.commands' for the exact commands, and 'provisioning.notes' for gotchas.",
+  "namespace": {
+    "name": "expense-approval-ns",
+    "sku": "Standard",
+    "reason": "Standard tier is required for Topics/Subscriptions (Basic tier only supports Queues)"
+  },
+  "queues": [
+    {
+      "name": "incoming-expenses",
+      "description": "Landing zone for validated expense submissions. Consumed exactly once by the Logic App orchestrator using peek-lock.",
+      "maxDeliveryCount": 5,
+      "lockDuration": "PT5M",
+      "defaultMessageTimeToLive": "P1D",
+      "deadLetteringOnMessageExpiration": true
+    }
+  ],
+  "topics": [
+    {
+      "name": "expense-outcomes",
+      "description": "Fan-out point for final expense decisions published by the Logic App. Each message carries a custom 'status' application property used for content-based routing to subscriptions.",
+      "defaultMessageTimeToLive": "P7D",
+      "subscriptions": [
+        {
+          "name": "approved-subscription",
+          "sqlFilter": "status = 'approved'",
+          "consumedBy": "notify_approved (Azure Function, Service Bus topic trigger)"
+        },
+        {
+          "name": "rejected-subscription",
+          "sqlFilter": "status = 'rejected'",
+          "consumedBy": "notify_rejected (Azure Function, Service Bus topic trigger)"
+        },
+        {
+          "name": "escalated-subscription",
+          "sqlFilter": "status = 'escalated'",
+          "consumedBy": "notify_escalated (Azure Function, Service Bus topic trigger) - could also fan out an additional Teams/email alert to finance since escalation implies the manager missed the SLA"
+        }
+      ]
+    }
+  ],
+  "provisioning": {
+    "tool": "Azure CLI",
+    "commands": [
+      "az group create --name rg-expense-approval --location canadacentral",
+      "az servicebus namespace create --resource-group rg-expense-approval --name expense-approval-ns --sku Standard",
+      "az servicebus queue create --resource-group rg-expense-approval --namespace-name expense-approval-ns --name incoming-expenses --max-delivery-count 5 --lock-duration PT5M --enable-dead-lettering-on-message-expiration true",
+      "az servicebus topic create --resource-group rg-expense-approval --namespace-name expense-approval-ns --name expense-outcomes",
+      "az servicebus topic subscription create --resource-group rg-expense-approval --namespace-name expense-approval-ns --topic-name expense-outcomes --name approved-subscription",
+      "az servicebus topic subscription rule create --resource-group rg-expense-approval --namespace-name expense-approval-ns --topic-name expense-outcomes --subscription-name approved-subscription --name approved-filter --filter-sql-expression \"status = 'approved'\"",
+      "az servicebus topic subscription rule delete --resource-group rg-expense-approval --namespace-name expense-approval-ns --topic-name expense-outcomes --subscription-name approved-subscription --name '$Default'",
+      "az servicebus topic subscription create --resource-group rg-expense-approval --namespace-name expense-approval-ns --topic-name expense-outcomes --name rejected-subscription",
+      "az servicebus topic subscription rule create --resource-group rg-expense-approval --namespace-name expense-approval-ns --topic-name expense-outcomes --subscription-name rejected-subscription --name rejected-filter --filter-sql-expression \"status = 'rejected'\"",
+      "az servicebus topic subscription rule delete --resource-group rg-expense-approval --namespace-name expense-approval-ns --topic-name expense-outcomes --subscription-name rejected-subscription --name '$Default'",
+      "az servicebus topic subscription create --resource-group rg-expense-approval --namespace-name expense-approval-ns --topic-name expense-outcomes --name escalated-subscription",
+      "az servicebus topic subscription rule create --resource-group rg-expense-approval --namespace-name expense-approval-ns --topic-name expense-outcomes --subscription-name escalated-subscription --name escalated-filter --filter-sql-expression \"status = 'escalated'\"",
+      "az servicebus topic subscription rule delete --resource-group rg-expense-approval --namespace-name expense-approval-ns --topic-name expense-outcomes --subscription-name escalated-subscription --name '$Default'"
+    ],
+    "notes": [
+      "Every subscription is created with a default 'TrueFilter' rule named '$Default' that matches all messages - it must be deleted (or replaced) after adding the SQL filter rule, otherwise every subscription receives every message regardless of status.",
+      "The 'ServiceBusConnection' app setting (Function App and Logic App API connection) should use a namespace-level Shared Access Policy scoped to only the permissions each component needs (Send for the Function's queue output binding, Listen for the topic-trigered notification functions).",
+      "For production, replace the connection-string based auth with a managed identity + Azure RBAC (Azure Service Bus Data Sender / Data Receiver roles) to avoid storing secrets in app settings."
+    ]
+  }
+}

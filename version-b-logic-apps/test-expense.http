@@ -1,0 +1,145 @@
+### =========================================================================
+### CST8917 - Assignment 2 - Version B (Logic Apps + Service Bus)
+### Test suite for the validation/ingestion Function endpoint.
+###
+### IMPORTANT: unlike Version A, the manager-approval and timeout logic runs
+### inside the Logic App (see ../logic-app-workflow.json), not in this HTTP
+### API. A plain HTTP client cannot drive that part directly - after queuing
+### a message here, verify the rest of the flow using the Azure Portal:
+###   1. Service Bus Explorer on the 'incoming-expenses' queue
+###      -> peek the message the Function just sent.
+###   2. Logic App > Overview > Run History
+###      -> watch the run: Parse_expense_JSON -> Amount_under_$100 branch.
+###   3. For amount >= $100: check the manager's inbox for the Approve/Reject
+###      email (Office 365 Outlook "Send approval email" connector), or wait
+###      out the PT5M demo timeout to see the escalated path fire.
+###   4. Service Bus Explorer on the 'expense-outcomes' topic
+###      -> peek each subscription (approved-subscription,
+###      rejected-subscription, escalated-subscription) for the final
+###      outcome message.
+###   5. Function App logs (Application Insights Live Metrics, or the
+###      `func start` console) -> notify_approved / notify_rejected /
+###      notify_escalated log line: "[NOTIFICATION -> ...]".
+###
+### Requires the VS Code "REST Client" extension (humao.rest-client).
+### Start the Functions host first:  func start
+### Provisioning commands for the Service Bus namespace/queue/topic are in
+### ./servicebus-config.json under "provisioning.commands".
+### =========================================================================
+
+@baseUrl = http://localhost:7071/api
+
+### -------------------------------------------------------------------------
+### SCENARIO 1: Valid expense < $100
+### Expected: 202 Accepted here. Logic App auto-approves (no email sent);
+### 'approved-subscription' should receive the outcome message.
+### -------------------------------------------------------------------------
+POST {{baseUrl}}/expenses
+Content-Type: application/json
+
+{
+  "employee_name": "Alice Smith",
+  "employee_email": "alice.smith@example.com",
+  "amount": 45.00,
+  "category": "meals",
+  "description": "Team lunch with client",
+  "manager_email": "manager.bob@example.com"
+}
+
+
+### -------------------------------------------------------------------------
+### SCENARIO 2: Valid expense >= $100 -> manager approves via email
+### Expected: 202 Accepted here. Logic App sends an approval email to
+### manager_email; click "Approve" in the email within the timeout window.
+### 'approved-subscription' should receive the outcome message.
+### -------------------------------------------------------------------------
+POST {{baseUrl}}/expenses
+Content-Type: application/json
+
+{
+  "employee_name": "Carlos Diaz",
+  "employee_email": "carlos.diaz@example.com",
+  "amount": 450.00,
+  "category": "travel",
+  "description": "Flight to client site in Toronto",
+  "manager_email": "manager.bob@example.com"
+}
+
+
+### -------------------------------------------------------------------------
+### SCENARIO 3: Valid expense >= $100 -> manager rejects via email
+### Expected: 202 Accepted here. Click "Reject" in the approval email.
+### 'rejected-subscription' should receive the outcome message.
+### -------------------------------------------------------------------------
+POST {{baseUrl}}/expenses
+Content-Type: application/json
+
+{
+  "employee_name": "Priya Nair",
+  "employee_email": "priya.nair@example.com",
+  "amount": 899.99,
+  "category": "equipment",
+  "description": "New graphics tablet",
+  "manager_email": "manager.bob@example.com"
+}
+
+
+### -------------------------------------------------------------------------
+### SCENARIO 4: Valid expense >= $100 -> no manager response -> escalated
+### Expected: 202 Accepted here. Do NOT respond to the approval email.
+### After the workflow's limit.timeout (PT5M demo value) elapses,
+### 'escalated-subscription' should receive the outcome message.
+### -------------------------------------------------------------------------
+POST {{baseUrl}}/expenses
+Content-Type: application/json
+
+{
+  "employee_name": "Daniel Wu",
+  "employee_email": "daniel.wu@example.com",
+  "amount": 1200.00,
+  "category": "software",
+  "description": "Annual IDE license renewal",
+  "manager_email": "manager.bob@example.com"
+}
+
+
+### -------------------------------------------------------------------------
+### SCENARIO 5: Missing required fields -> validation error
+### Expected: 400 Bad Request directly from the Function. Nothing is queued,
+### so the Logic App never runs for this request.
+### -------------------------------------------------------------------------
+POST {{baseUrl}}/expenses
+Content-Type: application/json
+
+{
+  "employee_name": "Emma Brown",
+  "employee_email": "emma.brown@example.com",
+  "amount": 60.00,
+  "category": "supplies"
+}
+
+
+### -------------------------------------------------------------------------
+### SCENARIO 6: Invalid category -> validation error
+### Expected: 400 Bad Request directly from the Function. Nothing is queued.
+### -------------------------------------------------------------------------
+POST {{baseUrl}}/expenses
+Content-Type: application/json
+
+{
+  "employee_name": "Frank Lee",
+  "employee_email": "frank.lee@example.com",
+  "amount": 250.00,
+  "category": "entertainment",
+  "description": "Client dinner and event tickets",
+  "manager_email": "manager.bob@example.com"
+}
+
+
+### -------------------------------------------------------------------------
+### EXTRA: Malformed JSON body -> 400
+### -------------------------------------------------------------------------
+POST {{baseUrl}}/expenses
+Content-Type: application/json
+
+{ this is not valid json }

@@ -1,0 +1,210 @@
+{
+  "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+  "contentVersion": "1.0.0.0",
+  "_comment": "Consumption Logic App workflow (Code View) for Version B. Import via Logic App Designer > Code View, then wire the 'servicebus' and 'office365' API connections in $connections (Logic App parameters) to real connections created in the portal. This is the visual/low-code counterpart to Version A's orchestrator function - the amount<$100 branch, the manager-approval-with-timeout human interaction pattern, and the outcome fan-out all live here instead of in Python.",
+  "parameters": {
+    "$connections": {
+      "defaultValue": {},
+      "type": "Object"
+    }
+  },
+  "triggers": {
+    "When_a_message_is_received_in_a_queue_(peek-lock)": {
+      "type": "ApiConnection",
+      "inputs": {
+        "host": {
+          "connection": { "referenceName": "servicebus" }
+        },
+        "method": "get",
+        "path": "/@{encodeURIComponent('incoming-expenses')}/messages/head/peek-lock"
+      },
+      "recurrence": { "frequency": "Second", "interval": 30 }
+    }
+  },
+  "actions": {
+    "Parse_expense_JSON": {
+      "type": "ParseJson",
+      "inputs": {
+        "content": "@base64ToString(triggerBody()?['ContentData'])",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "expense_id": { "type": "string" },
+            "employee_name": { "type": "string" },
+            "employee_email": { "type": "string" },
+            "amount": { "type": "number" },
+            "category": { "type": "string" },
+            "description": { "type": "string" },
+            "manager_email": { "type": "string" },
+            "submitted_at": { "type": "string" }
+          }
+        }
+      },
+      "runAfter": {}
+    },
+    "Amount_under_$100": {
+      "type": "If",
+      "expression": {
+        "and": [
+          { "less": ["@body('Parse_expense_JSON')?['amount']", 100] }
+        ]
+      },
+      "runAfter": { "Parse_expense_JSON": ["Succeeded"] },
+      "actions": {
+        "Compose_auto_approved_outcome": {
+          "type": "Compose",
+          "runAfter": {},
+          "inputs": {
+            "status": "approved",
+            "decided_by": "system",
+            "reason": "Auto-approved: amount below $100 threshold",
+            "expense": "@body('Parse_expense_JSON')"
+          }
+        },
+        "Send_outcome_to_topic_(auto-approved)": {
+          "type": "ApiConnection",
+          "runAfter": { "Compose_auto_approved_outcome": ["Succeeded"] },
+          "inputs": {
+            "host": { "connection": { "referenceName": "servicebus" } },
+            "method": "post",
+            "path": "/@{encodeURIComponent('expense-outcomes')}/messages",
+            "body": {
+              "ContentData": "@base64(string(outputs('Compose_auto_approved_outcome')))",
+              "ContentType": "application/json",
+              "Properties": { "status": "approved" }
+            }
+          }
+        }
+      },
+      "else": {
+        "actions": {
+          "Send_approval_email_and_wait_for_a_response": {
+            "type": "ApiConnectionWebhook",
+            "runAfter": {},
+            "inputs": {
+              "host": { "connection": { "referenceName": "office365" } },
+              "path": "/approvalmail/$subscriptions",
+              "body": {
+                "Message": {
+                  "To": "@body('Parse_expense_JSON')?['manager_email']",
+                  "Subject": "Expense Approval Required: @{body('Parse_expense_JSON')?['employee_name']} - $@{body('Parse_expense_JSON')?['amount']}",
+                  "Options": "Approve, Reject",
+                  "Importance": "Normal",
+                  "Body": "<p>@{body('Parse_expense_JSON')?['employee_name']} submitted a @{body('Parse_expense_JSON')?['category']} expense of $@{body('Parse_expense_JSON')?['amount']}.</p><p>Description: @{body('Parse_expense_JSON')?['description']}</p>"
+                }
+              }
+            },
+            "limit": {
+              "timeout": "PT5M"
+            },
+            "_comment_timeout": "PT5M is a short demo value so the escalation path is easy to test. Use a production value like P2D (2 days) for a real approval SLA. This 'limit.timeout' setting is the Logic-App-native equivalent of Version A's context.create_timer() raced against the external event via task_any()."
+          },
+          "Route_on_manager_response": {
+            "type": "Switch",
+            "runAfter": { "Send_approval_email_and_wait_for_a_response": ["Succeeded", "TimedOut"] },
+            "expression": "@coalesce(body('Send_approval_email_and_wait_for_a_response')?['SelectedOption'], 'TimedOut')",
+            "cases": {
+              "Approve": {
+                "case": "Approve",
+                "actions": {
+                  "Compose_approved_outcome": {
+                    "type": "Compose",
+                    "runAfter": {},
+                    "inputs": {
+                      "status": "approved",
+                      "decided_by": "@body('Parse_expense_JSON')?['manager_email']",
+                      "expense": "@body('Parse_expense_JSON')"
+                    }
+                  },
+                  "Send_outcome_to_topic_(approved)": {
+                    "type": "ApiConnection",
+                    "runAfter": { "Compose_approved_outcome": ["Succeeded"] },
+                    "inputs": {
+                      "host": { "connection": { "referenceName": "servicebus" } },
+                      "method": "post",
+                      "path": "/@{encodeURIComponent('expense-outcomes')}/messages",
+                      "body": {
+                        "ContentData": "@base64(string(outputs('Compose_approved_outcome')))",
+                        "ContentType": "application/json",
+                        "Properties": { "status": "approved" }
+                      }
+                    }
+                  }
+                }
+              },
+              "Reject": {
+                "case": "Reject",
+                "actions": {
+                  "Compose_rejected_outcome": {
+                    "type": "Compose",
+                    "runAfter": {},
+                    "inputs": {
+                      "status": "rejected",
+                      "decided_by": "@body('Parse_expense_JSON')?['manager_email']",
+                      "expense": "@body('Parse_expense_JSON')"
+                    }
+                  },
+                  "Send_outcome_to_topic_(rejected)": {
+                    "type": "ApiConnection",
+                    "runAfter": { "Compose_rejected_outcome": ["Succeeded"] },
+                    "inputs": {
+                      "host": { "connection": { "referenceName": "servicebus" } },
+                      "method": "post",
+                      "path": "/@{encodeURIComponent('expense-outcomes')}/messages",
+                      "body": {
+                        "ContentData": "@base64(string(outputs('Compose_rejected_outcome')))",
+                        "ContentType": "application/json",
+                        "Properties": { "status": "rejected" }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "default": {
+              "actions": {
+                "Compose_escalated_outcome": {
+                  "type": "Compose",
+                  "runAfter": {},
+                  "inputs": {
+                    "status": "escalated",
+                    "decided_by": "system",
+                    "reason": "Manager did not respond within the approval timeout window; expense auto-approved and flagged as escalated.",
+                    "expense": "@body('Parse_expense_JSON')"
+                  }
+                },
+                "Send_outcome_to_topic_(escalated)": {
+                  "type": "ApiConnection",
+                  "runAfter": { "Compose_escalated_outcome": ["Succeeded"] },
+                  "inputs": {
+                    "host": { "connection": { "referenceName": "servicebus" } },
+                    "method": "post",
+                    "path": "/@{encodeURIComponent('expense-outcomes')}/messages",
+                    "body": {
+                      "ContentData": "@base64(string(outputs('Compose_escalated_outcome')))",
+                      "ContentType": "application/json",
+                      "Properties": { "status": "escalated" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "Complete_the_message_in_a_queue": {
+      "type": "ApiConnection",
+      "runAfter": { "Amount_under_$100": ["Succeeded"] },
+      "inputs": {
+        "host": { "connection": { "referenceName": "servicebus" } },
+        "method": "delete",
+        "path": "/@{encodeURIComponent('incoming-expenses')}/messages/complete",
+        "queries": {
+          "lockToken": "@triggerBody()?['LockToken']"
+        }
+      }
+    }
+  },
+  "outputs": {}
+}
