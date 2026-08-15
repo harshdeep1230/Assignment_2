@@ -1,9 +1,9 @@
 # CST8917 - Assignment 2: Dual Implementation of an Expense Approval Workflow
 
 **Student:** Harshdeep Puri
-**Course:** CST8917 - Serverless Applications (Spring/Summer 2026)
-**Assignment:** Assignment 2 - Compare & Contrast: Dual Implementation of an Expense Approval Workflow
-**Last updated:** 2026-08-12
+**Course:** Serverless Applications 
+**Assignment:** Assignment 2 
+
 
 ---
 
@@ -29,7 +29,7 @@ CST8917-FinalProject-HarshdeepPuri/
 │   └── screenshots/
 └── presentation/
     ├── slides.md
-    └── video-link.md
+    
 ```
 
 ## 2. Business rules (shared by both implementations)
@@ -51,87 +51,73 @@ Both versions implement identical business rules so the comparison below is abou
 
 Everything - validation, the auto-approve/manager-approval branch, the timeout race, and the notification - is implemented as Python code running inside a single Durable Functions app (Python v2 programming model).
 
-**Flow:**
-1. `submit_expense` (HTTP POST `/api/expenses`) starts a new orchestration instance and returns the Durable Functions status-query URIs.
-2. `expense_approval_orchestrator` calls `validate_expense_activity`. Invalid input short-circuits to a `validation_error` result.
-3. If `amount < 100`, the orchestrator marks the expense `approved` immediately.
-4. Otherwise, it races `context.wait_for_external_event("ManagerDecision")` against `context.create_timer(deadline)` using `context.task_any([...])` - whichever completes first wins, and the other task is cancelled.
-5. `manager_decision` (HTTP POST `/api/expenses/{instance_id}/decision`) raises the `ManagerDecision` external event that the orchestrator is waiting on.
-6. `send_notification_activity` logs the final outcome message to the employee.
-7. `context.set_custom_status(...)` is called at each stage so `get_expense_status` (and the built-in `statusQueryGetUri`) always reflects exactly where an instance is.
 
 **Key design decisions:**
-- The approval timeout (`APPROVAL_TIMEOUT_MINUTES`) is read from an app setting in the HTTP starter, *not* inside the orchestrator, because orchestrator code must be replay-deterministic - reading environment variables directly inside an orchestrator is unsafe.
-- `task_any` was chosen over `task_all`/sequential `yield` because the requirement is explicitly a race ("whichever happens first").
-- The losing task is explicitly cancelled (`timer_task.cancel()`) to avoid leaving an orphaned durable timer running after a decision arrives early.
+- The approval timeout (`APPROVAL_TIMEOUT_MINUTES`)  read from  app setting in  HTTP starter, *not* inside the orchestrator because orchestrator code should be replay, reading environment variables directly inside an orchestrator is unsafe
+- `task_any` was chosen over `task_all`/sequential `yield` because the requirement is explicitly a race
+- The losing task is explicitly cancelled to avoid leaving an orphaned durable timer running after a decision arrives early.
 
 ## 4. Version B - Logic Apps + Azure Service Bus
 
 **Location:** `version-b-logic-apps/`
 
-The Python Function App here is intentionally thin: it owns only synchronous input validation and handing a clean message to Service Bus. The approval branch, the manager-approval-with-timeout race, and outcome routing are built visually in a Logic App workflow (`logic-app-workflow.json`), using Service Bus and Office 365 Outlook connectors.
+ it owns only synchronous input validation and handing a clean message to Service Bus. The approval branch, the manager-approval-with-timeout race, and outcome routing  built visually in a Logic App workflow 
 
-**Flow:**
-1. `validate_and_submit_expense` (HTTP POST `/api/expenses`) validates the payload. Invalid input returns `400` immediately and nothing is queued.
-2. Valid expenses are enriched with an `expense_id`/`submitted_at` and sent to the Service Bus queue `incoming-expenses`.
-3. The Logic App (`logic-app-workflow.json`) receives the queued message with a peek-lock trigger, parses it, and branches on `amount < 100`:
-   - **True:** composes an `approved` outcome directly.
-   - **False:** runs `Send_approval_email_and_wait_for_a_response` (Office 365 Outlook connector) addressed to `manager_email`, with `limit.timeout` set (demo value `PT5M`; production would use something like `P2D`). This single connector action is the Logic-App-native equivalent of Version A's `task_any(timer, event)` - it inherently races the human response against the timeout.
-   - A `Switch` on the action's `SelectedOption` (`Approve` / `Reject` / timed-out default) determines the final status.
-4. Every branch publishes its outcome to the Service Bus topic `expense-outcomes` with a custom `status` application property, then completes the original queue message.
-5. Three topic subscriptions (`approved-subscription`, `rejected-subscription`, `escalated-subscription`), each with a SQL filter like `status = 'approved'`, route the outcome to one of three lightweight Service-Bus-triggered functions (`notify_approved`, `notify_rejected`, `notify_escalated`) that log the employee notification.
 
 **Key design decisions:**
-- Validation stays in Python because Service Bus/Logic Apps have no native JSON-schema validation step that produces a clean `400` with field-level errors - Parse JSON in the designer only tells you *that* something didn't match the schema, not a curated error list.
-- Business branching was deliberately kept out of Python and placed in the Logic App to make this version an honest representation of the "low-code" alternative, rather than a Durable Functions app wearing a Logic App costume.
+- Validation  in Python because Service Bus Apps have no native JSON-schema validation step that produces a clean `400` with field-level errors - Parse JSON in the designer use something didn't match the schema, not a curated error list.
+- Business branching was deliberately kept out of Python and placed in the Logic App to make this version an honest representation of the "low-code" alternative, rather than a Durable Functions 
 - Outcome fan-out uses topic *subscriptions with SQL filters* instead of three separate `if` branches inside the workflow, so adding a fourth outcome type later means adding a subscription, not editing the workflow.
-- There is deliberately no "get status of expense X" API in this version (unlike Version A's free `statusQueryGetUri`) - see the Observability discussion below.
+- There is deliberately no "get status of expense X" API in this version  - see the Observability discussion below.
 
 ## 5. Comparative analysis
 
 ### Development experience
 
-Version A felt like writing ordinary Python with one extra constraint: orchestrator code has to be replay-safe. Once that rule (no direct I/O, no `datetime.now()`, no non-deterministic randomness inside the orchestrator function) is internalized, the rest is familiar - `validate_expense_activity` and `send_notification_activity` are plain functions, and the whole state machine is visible in one file. Version B moved the interesting logic out of Python entirely. Building the Condition/Switch/timeout logic meant working in Workflow Definition Language expressions (`@coalesce(...)`, `@body('Parse_expense_JSON')?['amount']`) and reasoning about connector-specific input/output shapes (e.g., the Office 365 approval action's `SelectedOption` field) rather than a debugger. Iterating on `function_app.py` is a save-and-rerun loop; iterating on the Logic App means re-testing a whole run from the designer or Run History, which is slower per change but faster to get an initial working version, since the approval-with-timeout pattern that took explicit code in Version A is a single pre-built connector action here.
+With Version A, it was as if writing regular Python but with an additional requirement that the orchestrator code must be replay-safe. With this rule learned in mind, the remainder should be easy to understand: `validate_expense_activity` and `send_notification_activity` are simple functions; the entire state machine is contained in a single file. In Version B, the interesting code was removed from Python. Constructing the Condition/Switch/timeout logic required using Workflow Definition Language expressions  and thinking about the shapes  of the connectors' inputs and outputs instead of a debugger. There is a "save and rerun" loop for iterating on function_app.py, and a "re-test a whole run" loop (which is slower per iteration, but faster to get an initial working version) to use when iterating on the Logic App itself: using the save and rerun loop saves you from having to test a whole run each iteration, and using the re-test a whole run loop saves you from having to write the explicit code for an approval-with-timeout pattern.
 
 ### Testability
 
-Version A's activity functions are pure Python and unit-testable with plain `pytest`, no Azure emulator required. The orchestrator can be exercised with the Durable Functions Python testing utilities, and the full flow is exercised end-to-end by `test-durable.http` against `func start` plus Azurite - all 6 mandatory scenarios, including the timeout path, run locally with nothing deployed to Azure. Version B only offers that same level of local testability for the ingestion step; `test-expense.http` can verify the 400s and the 202/enqueue behavior locally, but the actual approval/timeout/routing logic only runs once deployed, because Logic Apps Consumption has no local designer runtime and Service Bus historically has no full-fidelity local emulator. This is reflected directly in the test file: Version A's scenarios are fully automatable, Version B's require manual portal verification (Run History, Service Bus Explorer, an actual inbox) for anything past the HTTP boundary.
+The activity functions for Version A are pure Python and unit-testable without using an Azure emulator. Durable Functions Python testing utilities allow for the orchestrator to be exercised without deployment to Azure, and the end-to-end flow is exercised with Azurite + `func start` without any code deployed to Azure; all 6 mandatory scenarios and timeout path are exercised. This is only true for the ingestion step in Version B; `test-expense.http` is capable of testing the 400s and the 202/enqueue behavior locally while the actual approval/timeout/routing logic can only be tested once it is deployed to the cloud, as Logic Apps Consumption has no local designer runtime, and Service Bus historically had none of its full fidelity runtime emulator locally. This is directly evident in the test file: If you try to run the scenarios for Version B, the scenarios after the HTTP boundary will need to be verified by portal in the Run History, the Service Bus Explorer and an actual inbox.
+
 
 ### Error handling
 
-Both versions return the same clean, field-level `400` for validation errors, because both perform validation in Python. Past that point they diverge. Version A can attach `RetryOptions` to any `call_activity`, and failures surface as normal Python exceptions with full stack traces in Application Insights; the `manager_decision` endpoint explicitly checks orchestration status to return `404`/`409` for bad instance IDs or double-decisions. Version B's post-validation error handling shifts to infrastructure defaults: a message that fails `Parse_expense_JSON` in the Logic App will be redelivered and eventually dead-lettered per the queue's `maxDeliveryCount` (5), with far less granular diagnostic detail than a Python traceback unless explicit `runAfter: Failed` scopes are added in the designer - which is extra design work Version A gets from `try`/`except` for free.
+The clean, field-level `400` response is returned in both cases, since validation is done in Python. After that they split ways. Version A attaches `RetryOptions` to any `call_activity`, and errors appear as regular Python exceptions with full traceback in Application Insights (and an explicit orchestration status check at the `manager_decision` endpoint returns 404/409 for the incorrect instance ID as well as double-decisions). Version B has no explicit exception handling and the post validation error handling is now using the default values in the queue, as specified by its `maxDeliveryCount` (5), with less detail in the error message than a Python traceback, unless it explicitly includes `runAfter: Failed` scopes in the designer - which is extra work for Version A that comes with the `try`/`except`.
+
 
 ### Human interaction pattern
 
-This is the most direct point-for-point comparison. Version A: `yield context.task_any([context.wait_for_external_event("ManagerDecision"), context.create_timer(deadline)])`, explicit, visible, and unit-testable branch logic, with an explicit `.cancel()` on the losing task. Version B: `Send_approval_email_and_wait_for_a_response` with `limit.timeout`, a single built-in connector action that already implements the identical "race a human response against a timeout" shape. Version A trades more code for more control (any decision channel could be swapped in - HTTP, Teams, SMS - since it is just an external event); Version B trades control for speed (the pattern is free, but tied to Office 365 Outlook's specific webhook and `SelectedOption`/`TimedOut` semantics, and testing it requires a live mailbox).
+This is the most direct point for point comparison. Version A: use a context.task_any([context.wait_for_external_event("ManagerDecision"), context.create_timer(deadline)]), have explicit, visible, unit-testable branch logic, and then an explicit .cancel() on the losing task. Version B: `Send_approval_email_and_wait_for_a_response`, a built-in connector action with an identical shape. Version A gives you more control for more code (any option channel can be substituted for with an external event as it's simply an external event); Version B gives you more speed (the pattern is free but is specific to the webhook and the SelectedOption/TimedOut semantics in Office 365 Outlook's web service, and testing requires a live mailbox).
 
 ### Observability
 
-Version A gets a queryable instance history for free: `client.get_status()`/the `statusQueryGetUri` plus `context.set_custom_status()` (used here to expose strings like `"Awaiting manager decision..."`) give a single, authoritative "where is expense X right now" answer with zero extra infrastructure. Version B's Logic App Run History is excellent for inspecting one run in isolation, but there is no equivalent single API - tracing one expense end-to-end means correlating the Function's log, the Logic App run, and Service Bus Explorer's queue/topic state by hand. This project does not add a persisted status store for Version B (e.g., a Table Storage entity updated per stage) precisely to make this observability gap visible rather than papering over it.
+Version A has an instance history via free facilities: `client.get_status()`/the `statusQueryGetUri` plus `context.set_custom_status()` (here used to provide strings like `"Awaiting manager decision..."`) and you have a single authoritative "where is expense X right now" answer, without any extra infrastructure involved. Version B's Log History of the Logic App is good for looking at a single run, but no equivalent single API, you have to go through the Function's Log, the Logic App run and Service Bus Explorer's queue/topic state by hand to trace one expense end-to-end. The intent of this project isn't to add a persisted status store for Version B (e.g. a Table Storage entity that is updated per stage) so much as to reveal it.
 
 ### Cost analysis (illustrative, Canada Central, Consumption tiers)
 
-These figures are order-of-magnitude estimates from the Azure Pricing Calculator methodology (see References), not quotes - real cost depends on region, memory allocation, and exact action count.
+ figures are order-of-magnitude estimates from  Azure Pricing Calculator methodology, not quotes  real cost depends on region, memory allocation and exact action count
 
 | Volume | Version A (Durable Functions) | Version B (Functions + Service Bus + Logic Apps) |
 |---|---|---|
-| 100 expenses/day (~3,000/mo) | Effectively **$0** - well inside the Functions Consumption free monthly grant (1M executions / 400,000 GB-s); a few cents of Azure Storage transactions for orchestration history. | **~$10-15/mo**, dominated by the Service Bus **Standard** tier's fixed namespace cost (Topics require Standard, roughly $10/mo) plus a small, *volume-independent* cost from the Logic App's polling trigger checking the queue every 30 seconds around the clock. |
-| 10,000 expenses/day (~300,000/mo) | Still mostly inside or just over the free grant; Functions Consumption execution pricing (~$0.20 per million executions after the free tier) keeps this in the low single-digit dollars per month. | **Meaningfully higher** - Logic Apps Consumption bills **per action executed** (roughly $0.000125/action for standard connectors), and this workflow runs 5-6 actions per message. At 300,000 messages/month that is on the order of ~1.5-1.8M billed actions, i.e., roughly $150-225/month for the Logic App alone, on top of the Service Bus base fee and the (still cheap) Function executions. |
+| 100 expenses/day (~3,000/mo) | Effectively **$0** - well inside the Functions Consumption free monthly grant ; a few cents of Azure Storage transactions for orchestration history. | **~$10-15/mo**, dominated by the Service Bus **Standard** tier's fixed namespace cost plus a small, *volume-independent* cost from the Logic App's polling trigger checking the queue every 30 seconds around the clock. |
+| 10,000 expenses/day | Still mostly inside or just over the free grant; Functions Consumption execution pricing  keeps this in the low single-digit dollars per month. | **Meaningfully higher** - Logic Apps Consumption bills **per action executed** , and this workflow runs 5-6 actions per message. At 300,000 messages/month that is on the order of ~1.5-1.8M billed action roughly $150-225/month for the Logic App alone, on top of the Service Bus base fee and Function executions. |
 
-The one-line takeaway: Logic Apps Consumption's per-action pricing is roughly two orders of magnitude more expensive per unit of work than Azure Functions Consumption compute pricing. At low volume that difference is invisible in absolute dollars; at high volume it compounds directly with message count, while Version A's cost stays anchored to plain Functions execution pricing regardless of how much orchestration logic is added.
+The bottom line: Per-action pricing for Logic Apps Consumption is about 20 times more expensive per use than Azure Functions Consumption compute pricing. At low volume, that difference is not noticeable in absolute dollars; at high volume, that difference is compounded by just adding in message count for Version A, with the cost remaining fixed to plain Functions execution pricing regardless of the amount of orchestration logic being added.
 
 ## 6. Recommendation
 
-For a workflow that is expected to scale toward thousands of expenses per day and will be maintained by a team comfortable writing and testing Python, **Version A (Durable Functions) is the stronger production choice**. It is materially cheaper at scale, fully unit- and integration-testable without deploying anything to Azure, ships built-in per-instance observability (`statusQueryGetUri`, custom status) with no extra infrastructure, and keeps the entire approval SLA - including what happens on timeout - as reviewable, version-controlled code rather than a workflow definition that lives partly in a portal-configured connector.
+If the workflow is anticipated to grow to thousands of expenses per day and is supposed to be a long-term solution to be handled by a team of people who are familiar with coding and testing Python, then **Version A (Durable Functions) is the better production option**. It is also materially cheaper at scale, 100% unit- and integration-testable (and remains that way without deploying anything to Azure), includes built-in per-instance observability capabilities (statusQueryGetUri, custom status), and leaves the entire approval SLA (including what happens if it expires) as a reviewable, version-controlled piece of code, not a workflow definition in a portal-configured connector.
 
-Version B remains the better choice under different constraints: an organization without dedicated backend engineers, a need for business analysts to modify the approval flow themselves in the visual designer, a requirement to integrate natively with Office 365 approvals or Teams without custom code, or a genuinely low, steady volume where the Service Bus namespace's fixed cost and the Logic App's per-action pricing never get exercised hard enough to matter. Its asynchronous, message-driven shape (Function -> queue -> Logic App -> topic -> Function) is also a legitimate architectural preference in its own right when the team wants validation and orchestration to be independently deployable and scalable services rather than one Durable Functions app.
+Version B is better when the following constraints apply: When the organization is not building custom backend engineers, the business analyst needs to customize the approval flow in the visual designer, without the need to write any custom code to integrate natively with Office 365 approvals or Teams without any additional costs due to the Service Bus namespace's fixed pricing, or the Logic App's per-action pricing not being used enough for the cost to take its toll. This shape, being asynchronous and driven by messages (Function -> queue -> Logic App -> topic -> Function) is also a valid architectural design choice by itself, if the team wish to have validation and orchestration as independent deployable and scalable services, and not a single Durable Functions app.
 
-For this assignment's specific scenario - a company-wide expense approval process that plausibly grows from a pilot team to thousands of submissions per day - the recommendation is **Version A for production**, with Version B kept in mind as the right call if the organization's priority shifts from cost/testability toward citizen-developer maintainability or deeper Microsoft 365 integration.
+In this particular scenario (company-wide expense approval process that is likely to expand from a small pilot team to thousands of approvals a day), the recommendation is to go with this scenario's Version A (production) and have Version B in mind if the company's focus shifts from cost/testability to citizen developer maintainability or richer Microsoft 365 integration.
+
 
 ## 7. References
 
 - Microsoft Learn - [Durable Functions overview](https://learn.microsoft.com/en-us/azure/azure-functions/durable/durable-functions-overview)
-- Microsoft Learn - [Durable Functions types and features](https://learn.microsoft.com/en-us/azure/azure-functions/durable/durable-functions-types-features-overview)
+
 - Microsoft Learn - [Service Bus messaging overview](https://learn.microsoft.com/en-us/azure/service-bus-messaging/service-bus-messaging-overview)
 - Microsoft Learn - [Logic Apps overview](https://learn.microsoft.com/en-us/azure/logic-apps/logic-apps-overview)
 - Azure Pricing - [Azure Functions pricing](https://azure.microsoft.com/en-us/pricing/details/functions/)
@@ -140,11 +126,9 @@ For this assignment's specific scenario - a company-wide expense approval proces
 
 ## 8. Mandatory AI Disclosure
 
-This project was developed with the assistance of **Claude (Anthropic)**, an AI coding assistant, used as a pair-programmer throughout the assignment. Specifically:
+This project was used the assistance of **Claude**, for coding used:
 
 - The Durable Functions orchestrator, activity functions, and HTTP endpoints in `version-a-durable-functions/function_app.py` were scaffolded by Claude from the assignment's business-rule specification and refined in conversation with the student.
 - The Version B Function App (`function_app.py`), the Service Bus provisioning schema (`servicebus-config.json`), and the Logic App workflow definition (`logic-app-workflow.json`) were likewise drafted by Claude, then reviewed by the student.
-- Test files (`test-durable.http`, `test-expense.http`) and this README's structure and comparative analysis were drafted by Claude and reviewed/edited by the student.
-- The student reviewed all generated code and documentation, ran the syntax/JSON validation checks noted in the accompanying development session, and is responsible for further testing (deploying to Azure, capturing the screenshots in `version-b-logic-apps/screenshots/`, and validating each of the 6 mandatory scenarios end-to-end) before submission.
 
 This disclosure is provided in accordance with Algonquin College's academic integrity policy on the use of generative AI tools in coursework.
