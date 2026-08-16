@@ -53,7 +53,7 @@ Everything - validation, the auto-approve/manager-approval branch, the timeout r
 
 
 **Key design decisions:**
-- The approval timeout (`APPROVAL_TIMEOUT_MINUTES`)  read from  app setting in  HTTP starter, *not* inside the orchestrator because orchestrator code should be replay, reading environment variables directly inside an orchestrator is unsafe
+- The approval timeout   read from  app setting in  HTTP starter, *not* inside the orchestrator because orchestrator code should be replay, reading environment variables directly inside an orchestrator is unsafe
 - `task_any` was chosen over `task_all`/sequential `yield` because the requirement is explicitly a race
 - The losing task is explicitly cancelled to avoid leaving an orphaned durable timer running after a decision arrives early.
 
@@ -74,7 +74,7 @@ Everything - validation, the auto-approve/manager-approval branch, the timeout r
 
 ### Development experience
 
-With Version A, it was as if writing regular Python but with an additional requirement that the orchestrator code must be replay-safe. With this rule learned in mind, the remainder should be easy to understand: `validate_expense_activity` and `send_notification_activity` are simple functions; the entire state machine is contained in a single file. In Version B, the interesting code was removed from Python. Constructing the Condition/Switch/timeout logic required using Workflow Definition Language expressions  and thinking about the shapes  of the connectors' inputs and outputs instead of a debugger. There is a "save and rerun" loop for iterating on function_app.py, and a "re-test a whole run" loop (which is slower per iteration, but faster to get an initial working version) to use when iterating on the Logic App itself: using the save and rerun loop saves you from having to test a whole run each iteration, and using the re-test a whole run loop saves you from having to write the explicit code for an approval-with-timeout pattern.
+With Version A, it was as if writing regular Python but with an additional requirement that the orchestrator code must be replay-safe. With this rule learned in mind, the remainder should be easy to understand: `validate_expense_activity` and `send_notification_activity` are simple functions; the entire state machine is contained in a single file. In Version B, the interesting code was removed from Python. Constructing the Condition/Switch/timeout logic required using Workflow Definition Language expressions  and thinking about the shapes  of the connectors' inputs and outputs instead of a debugger. There is a "save and rerun" loop for iterating on function_app.py, and a "re-test a whole run" loop  to use when iterating on the Logic App itself: using the save and rerun loop saves you from having to test a whole run each iteration, and using the re-test a whole run loop saves you from having to write the explicit code for an approval-with-timeout pattern.
 
 ### Testability
 
@@ -83,16 +83,16 @@ The activity functions for Version A are pure Python and unit-testable without u
 
 ### Error handling
 
-The clean, field-level `400` response is returned in both cases, since validation is done in Python. After that they split ways. Version A attaches `RetryOptions` to any `call_activity`, and errors appear as regular Python exceptions with full traceback in Application Insights (and an explicit orchestration status check at the `manager_decision` endpoint returns 404/409 for the incorrect instance ID as well as double-decisions). Version B has no explicit exception handling and the post validation error handling is now using the default values in the queue, as specified by its `maxDeliveryCount` (5), with less detail in the error message than a Python traceback, unless it explicitly includes `runAfter: Failed` scopes in the designer - which is extra work for Version A that comes with the `try`/`except`.
+The clean, field-level `400` response is returned in both cases, since validation is done in Python. After that they split ways. Version A attaches `RetryOptions` to any `call_activity`, and errors appear as regular Python exceptions with full traceback in Application Insights. Version B has no explicit exception handling and the post validation error handling is now using the default values in the queue, as specified by its `maxDeliveryCount` (5), with less detail in the error message than a Python traceback, unless it explicitly includes `runAfter: Failed` scopes in the designer - which is extra work for Version A that comes with the `try`/`except`
 
 
 ### Human interaction pattern
 
-This is the most direct point for point comparison. Version A: use a context.task_any([context.wait_for_external_event("ManagerDecision"), context.create_timer(deadline)]), have explicit, visible, unit-testable branch logic, and then an explicit .cancel() on the losing task. Version B: `Send_approval_email_and_wait_for_a_response`, a built-in connector action with an identical shape. Version A gives you more control for more code (any option channel can be substituted for with an external event as it's simply an external event); Version B gives you more speed (the pattern is free but is specific to the webhook and the SelectedOption/TimedOut semantics in Office 365 Outlook's web service, and testing requires a live mailbox).
+This is the most direct point for point comparison. Version A: use a context.task_any([context.wait_for_external_event("ManagerDecision"), context.create_timer(deadline)]), have explicit, visible, unit-testable branch logic, and then an explicit .cancel() on the losing task. Version B: `Send_approval_email_and_wait_for_a_response`, a built-in connector action with an identical shape. Version A gives you more control for more code (any option channel can be substituted for with an external event as it's simply an external event); Version B gives you more speed (the pattern is free but is specific to the webhook and the SelectedOptionn in Office 365 Outlook's web service, and testing requires a live mailbox).
 
 ### Observability
 
-Version A has an instance history via free facilities: `client.get_status()`/the `statusQueryGetUri` plus `context.set_custom_status()` (here used to provide strings like `"Awaiting manager decision..."`) and you have a single authoritative "where is expense X right now" answer, without any extra infrastructure involved. Version B's Log History of the Logic App is good for looking at a single run, but no equivalent single API, you have to go through the Function's Log, the Logic App run and Service Bus Explorer's queue/topic state by hand to trace one expense end-to-end. The intent of this project isn't to add a persisted status store for Version B (e.g. a Table Storage entity that is updated per stage) so much as to reveal it.
+Version A has an instance history via free facilities: `client.get_status()`/the `statusQueryGetUri` plus `context.set_custom_status()`  and you have a single authoritative "where is expense X right now" answer, without any extra infrastructure involved. Version B's Log History of the Logic App is good for looking at a single run, but no equivalent single API, you have to go through the Function's Log, the Logic App run and Service Bus Explorer's queue/topic state by hand to trace one expense end-to-end. The intent of this project isn't to add a persisted status store for Version B  so much as to reveal it.
 
 ### Cost analysis (illustrative, Canada Central, Consumption tiers)
 
@@ -111,7 +111,7 @@ If the workflow is anticipated to grow to thousands of expenses per day and is s
 
 Version B is better when the following constraints apply: When the organization is not building custom backend engineers, the business analyst needs to customize the approval flow in the visual designer, without the need to write any custom code to integrate natively with Office 365 approvals or Teams without any additional costs due to the Service Bus namespace's fixed pricing, or the Logic App's per-action pricing not being used enough for the cost to take its toll. This shape, being asynchronous and driven by messages (Function -> queue -> Logic App -> topic -> Function) is also a valid architectural design choice by itself, if the team wish to have validation and orchestration as independent deployable and scalable services, and not a single Durable Functions app.
 
-In this particular scenario (company-wide expense approval process that is likely to expand from a small pilot team to thousands of approvals a day), the recommendation is to go with this scenario's Version A (production) and have Version B in mind if the company's focus shifts from cost/testability to citizen developer maintainability or richer Microsoft 365 integration.
+In this particular scenario (company-wide expense approval process that is likely to expand from a small pilot team to thousands of approvals a day), the recommendation is to go with this scenario's Version A and have Version B in mind if the company's focus shifts from cost to citizen developer maintainability or richer Microsoft 365 integration.
 
 
 ## 7. References
@@ -131,4 +131,4 @@ This project was used the assistance of **Claude**, for coding used:
 - The Durable Functions orchestrator, activity functions, and HTTP endpoints in `version-a-durable-functions/function_app.py` 
 - The Version B Function App (`function_app.py`), the Service Bus provisioning schema (`servicebus-config.json`),
 
-This disclosure is provided in accordance with Algonquin College's academic integrity policy on the use of generative AI tools in coursework.
+
