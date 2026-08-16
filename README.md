@@ -1,8 +1,7 @@
 # CST8917 - Assignment 2: Dual Implementation of an Expense Approval Workflow
 
-**Student:** Harshdeep Puri
-**Course:** Serverless Applications 
-**Assignment:** Assignment 2 
+
+**Vedio:** (https://youtu.be/z1JGzPAbYyQ)
 
 
 ---
